@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>estudo</groupId>
+  <artifactId>encurtador-fase5</artifactId>
+  <version>1.0</version>
+
+  <!--
+    Primeira fase com Maven. Ate a 4 tudo vinha da biblioteca padrao do Java e o
+    arquivo unico bastava. Agora precisamos do cliente Kafka, que e codigo de
+    terceiro - e e isso que o Maven resolve: baixar e por no classpath.
+  -->
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kafka.version>4.3.1</kafka.version>
+    <!-- porta do servidor: mvn exec:exec -Dporta=9090 -->
+    <porta>8080</porta>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-clients</artifactId>
+      <version>${kafka.version}</version>
+    </dependency>
+    <!--
+      O cliente Kafka loga via SLF4J; sem uma implementacao ele so reclama.
+      A versao TEM que casar com a do slf4j-api que o kafka-clients traz
+      (mvn dependency:tree para conferir) - 2.x com api 1.7 nao se enxergam.
+    -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>1.7.36</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <configuration>
+          <!-- exec (nao java) para conseguir passar -ea e ligar o auto-teste. -->
+          <executable>java</executable>
+          <arguments>
+            <argument>-ea</argument>
+            <argument>-classpath</argument>
+            <classpath/>
+            <argument>Encurtador</argument>
+            <argument>${porta}</argument>
+          </arguments>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
