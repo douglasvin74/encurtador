@@ -13,7 +13,7 @@ e só avança quando a anterior está rodando.
 | 4 ✅ | Concorrência com virtual threads | `Executors.newVirtualThreadPerTaskExecutor()`, custo de thread, bloqueio de I/O, corrida check-then-act |
 | 5 ✅ | Publicação de eventos de clique no Kafka | Produtor, tópico, partição, chave, entrega assíncrona, degradação graciosa |
 | 6 ✅ | Consumidor de estatísticas | Grupo de consumidores, offset, rebalanceamento, at-least-once, CQRS |
-| 7 | Múltiplas instâncias atrás de load balancer | Statelessness, round-robin, health check, escala horizontal |
+| 7 ✅ | Múltiplas instâncias atrás de load balancer | Statelessness, round-robin, health check, escala horizontal |
 | 8 | Empacotamento | Docker, `docker compose`, variáveis de ambiente |
 
 ## Stack
@@ -21,7 +21,8 @@ e só avança quando a anterior está rodando.
 - **Java 25 (LTS)** — virtual threads finalizadas desde a 21; escolhido pelo suporte de longo prazo.
 - **Maven** — build e dependências. Adiado: até a fase 4 nada sai da stdlib, então o arquivo único continua bastando. Entra quando houver dependência de verdade (Kafka, fase 5).
 - **Kafka 4.3.1 (KRaft)** — broker de eventos. Instalado em `~/.local/opt/kafka`, rodando na JVM local; sem Docker até a fase 8.
-- **Nginx** — load balancer (fase 7).
+- **Nginx** — load balancer (fase 7). Instalado via apt, rodando sem serviço (`nginx -p`).
+- **PostgreSQL 18** — fonte da verdade do mapa código→URL a partir da fase 7. Entra porque é ele que tira o estado de dentro do processo; sem isso não há statelessness, e sem statelessness não há load balance.
 - Sem framework web (nada de Spring) por escolha: o objetivo é ver o mecanismo,
   não a abstração que o esconde.
 
@@ -303,7 +304,7 @@ Detalhe que custou um ciclo: o consumidor do teste usa grupo novo com
 `auto.offset.reset=earliest`. Com `latest`, entrar no grupo demora alguns
 segundos e o evento já passou quando ele chega.
 
-## Fase 6 — estado atual
+## Fase 6 — concluída
 
 `fase6/`. Dois programas no mesmo projeto, um de cada lado do Kafka:
 
@@ -368,3 +369,134 @@ a fim prova que a ligação existe.
 
 A espera é ativa com prazo (20s): consumo é assíncrono, a contagem chega, mas
 não instantaneamente.
+## Fase 7 — estado atual
+
+`fase7/`. Os mesmos dois programas da fase 6, mais duas coisas: o estado saiu do
+processo e passou a existir um load balancer na frente.
+
+```
+                  :8080
+              +----------+
+   cliente -->|  Nginx   |
+              +----+-----+
+                   | round-robin
+          +--------+--------+
+          v                 v
+   Encurtador a        Encurtador b        (:8091, :8092)
+          |                 |
+          +--------+--------+
+                   |                 \
+                   v                  v
+              PostgreSQL           Kafka  -->  Contador (:8081)
+             codigo -> url        cliques      codigo -> contagem
+```
+
+### O que exatamente muda
+
+Nada no comportamento visível. Encurtar continua devolvendo o mesmo código para
+a mesma URL, clicar continua dando 302, a estatística continua chegando. O que
+muda é *onde o link mora* — e é isso que permite existir mais de uma cópia.
+
+| | Fase 6 | Fase 7 |
+|---|---|---|
+| Mapa código→URL | `ConcurrentHashMap` + `links.properties` local | tabela `links` no Postgres |
+| Instâncias possíveis | 1 | N |
+| Encurtar em A, clicar em B | 404 | 302 |
+| Escrita concorrente | `putIfAbsent` (uma JVM) | `ON CONFLICT DO NOTHING` (todas) |
+
+### Statelessness
+
+O processo não guarda nada entre uma requisição e outra. É a única exigência que
+o load balancer faz do nosso lado, e a razão é direta: o Nginx manda a
+requisição para qualquer instância, sem saber (nem querer saber) o que aconteceu
+antes. Se o link vivesse na memória de quem o criou, metade dos cliques cairia na
+instância errada e daria 404.
+
+Vale ver o que *não* foi preciso fazer: nada de sessão pegajosa (`ip_hash`),
+nada de sincronizar instância com instância. Estado compartilhado num lugar só,
+e as cópias viram descartáveis — dá para matar e subir qualquer uma a qualquer
+momento. Escala horizontal é consequência disso, não uma feature à parte.
+
+### `ON CONFLICT DO NOTHING` é o `putIfAbsent` da fase 4
+
+O mesmo problema de check-then-act da fase 4, um nível acima. Lá, duas threads
+da mesma JVM podiam ler "não existe" ao mesmo tempo e as duas gravarem; o
+`ConcurrentHashMap` resolveu. Aqui são dois *processos*, e nenhuma estrutura de
+memória alcança os dois — quem decide passa a ser a chave primária da tabela:
+
+```sql
+INSERT INTO links (codigo, url) VALUES (?, ?)
+  ON CONFLICT (codigo) DO NOTHING RETURNING codigo
+```
+
+`RETURNING` é o que diz se a linha é nossa. Vazio significa que alguém chegou
+antes: aí lemos quem está lá para saber se é a mesma URL (mesmo código, hash
+determinístico da fase 2) ou uma colisão de hash (próxima tentativa).
+
+### Dependência dura e dependência mole
+
+A fase 7 deixa a assimetria explícita:
+
+| | Postgres | Kafka |
+|---|---|---|
+| Fora do ar | ninguém é redirecionado | tudo funciona, perde-se estatística |
+| `/health` pergunta | sim | não |
+
+Por isso `/health` consulta o banco (`SELECT 1`) e ignora o broker. Um health
+check que reprovasse por causa do Kafka tiraria todas as instâncias da rotação
+ao mesmo tempo — derrubando o site inteiro para preservar um contador. Health
+check deve responder "consigo atender?", não "está tudo perfeito?".
+
+Isso não é teoria: durante o teste desta fase o broker caiu sozinho, e o
+redirect continuou respondendo 302 normalmente. Só os cliques daquele intervalo
+se perderam, com `clique nao publicado` no log.
+
+### Health check no Nginx aberto é passivo
+
+`max_fails=2 fail_timeout=10s`: o Nginx não pergunta nada a ninguém. Ele repara
+que a instância falhou *atendendo tráfego real* e a tira da rotação por 10s.
+Checagem ativa (bater em `/health` de tempos em tempos) só existe no Nginx Plus.
+No aberto, `/health` serve para o auto-teste e para quem está olhando — e será o
+que o Docker vai usar como `healthcheck` na fase 8.
+
+`proxy_next_upstream` inclui `non_idempotent`, o que normalmente é arriscado com
+POST. Aqui pode: `POST /encurtar` é idempotente desde a fase 2 — a mesma URL
+sempre dá o mesmo código, então repetir não cria nada novo.
+
+### Configuração por ambiente
+
+As instâncias são idênticas; só o ambiente difere. `DB_URL`, `DB_USER`,
+`DB_PASSWORD`, `KAFKA_BOOTSTRAP` e `INSTANCIA` (só um rótulo, devolvido no
+header `X-Instancia` — sem ele não dá para *ver* o round-robin acontecendo).
+Isso já é preparação da fase 8: é assim que o `docker compose` vai diferenciar
+as cópias.
+
+Detalhe de ambiente que custa tempo: pelo socket Unix o `psql` usa `peer` e não
+pede senha, mas o JDBC vai por TCP e cai no `scram-sha-256`. O role precisa de
+senha e o `DB_PASSWORD` precisa estar no ambiente.
+
+### Verificação
+
+`AutoTeste.duasInstancias()` é o teste que define a fase: dois `Encurtador`
+independentes, em portas diferentes, sem referência um ao outro. Encurta no
+primeiro, resolve no segundo. Até a fase 6 este teste falhava com 404 — e
+falhava por um bom motivo.
+
+O que foi verificado à mão, com o Nginx no ar:
+
+- round-robin alternando `a`, `b`, `a`, `b` em requisições consecutivas;
+- link criado pela :8080 resolvendo direto na :8091 **e** na :8092;
+- `kill` na instância `a` → seis 302 seguidos, todos por `b`, nenhum 502;
+- instância `a` de volta → tráfego volta a dividir 3/3;
+- 6 cliques pela :8080, espalhados entre as duas, viram `"cliques":6` na :8081.
+
+### Limitações assumidas
+
+- **Uma conexão nova por operação**, sem pool (`ponytail:` no código). Alguns ms
+  de handshake por requisição; HikariCP entra se a latência incomodar.
+- **Schema criado pela aplicação** (`CREATE TABLE IF NOT EXISTS`), para o
+  projeto subir com um comando. Sistema de verdade usa migração versionada.
+- **Um `Contador` só.** A contagem continua na memória dele; com dois, cada um
+  vê só as partições que lhe couberam. O lado da escrita escala nesta fase, o da
+  leitura não.
+- **Tudo na mesma máquina.** É exatamente o teto que a fase 8 remove.

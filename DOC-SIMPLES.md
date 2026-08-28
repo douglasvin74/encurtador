@@ -27,7 +27,7 @@ entender, e só então subir o próximo.
 | 4 ✅ | Aguenta muita gente ao mesmo tempo | **Virtual threads** |
 | 5 ✅ | Registra cada clique sem travar | **Kafka** |
 | 6 ✅ | Conta e agrupa esses cliques | Como processar em segundo plano, e por que separar quem escreve de quem lê |
-| 7 | Roda em várias cópias ao mesmo tempo | **Load balance** |
+| 7 ✅ | Roda em várias cópias ao mesmo tempo | **Load balance** |
 | 8 | Qualquer pessoa consegue rodar seu projeto | Docker (empacotamento) |
 
 Ao final, isso é um projeto de GitHub que se defende sozinho numa entrevista.
@@ -265,7 +265,7 @@ de um link na fase 6 recebe tudo daquele link em ordem, sem bagunça.
 aponta para um Kafka que não existe, só para provar que o site continua de pé
 sem ele.
 
-## Fase 6 — o que já está pronto
+## Fase 6 — dois programas, um correio no meio
 
 Na fase 5 os cliques viravam recados no correio. Agora tem alguém **retirando**
 os recados e somando.
@@ -329,6 +329,113 @@ parte da conta. Para somar tudo de verdade, a contagem precisaria ficar num
 lugar compartilhado. Está marcado no código; é assunto de outro projeto.)
 
 ---
+
+## Fase 7 — o que já está pronto
+
+Até agora existia **um** programa atendendo todo mundo. Se ele caísse, o site
+caía. Se muita gente chegasse junto, ele sozinho aguentava o tranco.
+
+Agora existem **duas cópias iguais** do site, e um porteiro na frente decidindo
+quem atende cada pessoa. O porteiro é o **Nginx**, e essa distribuição é o
+**load balance**.
+
+### O problema que apareceu primeiro
+
+A ideia parece simples — é só subir o programa duas vezes. Mas aí acontece isto:
+
+> Você encurta um link, e quem te atendeu foi a **cópia A**. Ela anota o link no
+> caderninho dela. Você manda o link para um amigo, ele clica, e o porteiro
+> manda o clique para a **cópia B** — que nunca ouviu falar desse link.
+> Resultado: "código não encontrado".
+
+O problema é o caderninho. Enquanto cada cópia tem o seu, elas não são cópias de
+verdade, são programas diferentes fingindo ser o mesmo.
+
+### A solução: ninguém tem caderninho
+
+O caderninho sai de dentro das cópias e vira um **banco de dados** (o
+PostgreSQL) do lado de fora, que todas consultam. Agora nenhuma cópia sabe nada
+que as outras não saibam — e por isso qualquer uma pode atender qualquer pessoa.
+
+Isso tem nome: o programa ficou **stateless** (sem estado). É a única exigência
+para poder ter várias cópias, e é a ideia central desta fase.
+
+O ganho aparece na hora: dá para matar uma cópia no meio do expediente e o site
+continua no ar, porque a outra sabe exatamente as mesmas coisas. E se um dia
+precisar aguentar mais gente, você sobe uma terceira, uma quarta — sem mudar
+uma linha de código.
+
+### O porteiro precisa saber quem está de pé
+
+Cada cópia responde numa porta especial, a `/health` — o equivalente a "você
+está bem?". Se ela não responde, o porteiro para de mandar gente para lá até ela
+melhorar.
+
+Um detalhe que parece besteira e não é: essa pergunta olha o **banco**, não o
+correio (o Kafka). Porque sem banco a cópia realmente não consegue atender
+ninguém, mas sem correio ela atende normal — só deixa de contar os cliques. Se
+o "você está bem?" reprovasse por causa do correio, **todas** as cópias seriam
+tiradas do ar ao mesmo tempo, e o site inteiro cairia para proteger um contador.
+
+Isso aconteceu de verdade durante o teste: o correio caiu sozinho, e o site
+continuou redirecionando sem ninguém perceber. Só os cliques daquele intervalo
+se perderam.
+
+### Como rodar
+
+Precisa do Postgres e do Nginx instalados, e o banco criado:
+
+```bash
+sudo -u postgres psql -c "CREATE ROLE $USER LOGIN CREATEDB" \
+                     -c "CREATE DATABASE encurtador OWNER $USER"
+psql -d encurtador -c "ALTER ROLE $USER PASSWORD 'encurtador'"
+export DB_PASSWORD=encurtador
+```
+
+Quatro terminais — duas cópias do site, o contador e o porteiro:
+
+```bash
+cd encurtador/fase7
+INSTANCIA=a mvn -q exec:exec -Dporta=8091      # copia A
+INSTANCIA=b mvn -q exec:exec -Dporta=8092      # copia B
+mvn -q exec:exec -Dclasse=Contador -Dporta=8081
+
+mkdir -p /tmp/nginx-encurtador/logs
+nginx -p /tmp/nginx-encurtador -c $PWD/nginx.conf     # o porteiro, porta 8080
+```
+
+Agora tudo passa pela **8080** e você nem sabe quem atendeu. Para ver o rodízio,
+olhe o cabeçalho `X-Instancia`:
+
+```bash
+for i in $(seq 4); do curl -s -D- -o /dev/null http://localhost:8080/health | grep -i x-instancia; done
+```
+
+```
+X-instancia: a
+X-instancia: b
+X-instancia: a
+X-instancia: b
+```
+
+E a prova de que o caderninho é compartilhado: encurte pela 8080 e resolva
+direto em cada cópia — as duas conhecem o link.
+
+```bash
+curl -X POST --data 'https://exemplo.com/promo' http://localhost:8080/encurtar
+# devolve /dwr89s
+curl -i http://localhost:8091/dwr89s    # 302
+curl -i http://localhost:8092/dwr89s    # 302 tambem
+```
+
+Para o teste favorito: derrube uma cópia (Ctrl+C) e fique clicando pela 8080. O
+site não pisca — o porteiro percebe e manda tudo para a que sobrou.
+
+### O que ainda incomoda
+
+Tudo isso está rodando na **sua máquina**, montado à mão, num terminal por
+programa. Cinco coisas para subir na ordem certa, e nenhuma garantia de que vai
+funcionar igual em outro computador. É esse incômodo que a fase 8 resolve.
 
 ## Dicionário
 
@@ -500,6 +607,27 @@ cria compromisso: agora você depende da versão, dos bugs e da vida dela.
 **Load balance** *(balanceamento de carga)* — quando um servidor não dá conta,
 você põe vários e coloca um "porteiro" na frente distribuindo quem vai para
 onde. É a fase 7.
+
+**Stateless** *(sem estado)* — programa que não guarda nada entre um pedido e
+outro; tudo que ele precisa saber está fora dele. É o que permite ter várias
+cópias iguais, e por isso é a base do load balance.
+
+**Round-robin** — a forma mais simples de distribuir: um para cada, em rodízio.
+Primeiro pedido para a cópia A, segundo para a B, terceiro volta para a A.
+
+**Health check** — o porteiro perguntando "você está bem?" para cada cópia. Quem
+não responde para de receber gente até melhorar.
+
+**Escala horizontal** — crescer somando máquinas iguais, em vez de trocar por
+uma máquina maior (que seria escala *vertical*).
+
+**Banco de dados** — programa especializado em guardar informação de forma
+organizada e responder perguntas sobre ela. O nosso é o PostgreSQL, e desde a
+fase 7 é onde os links moram.
+
+**Chave primária** — a coluna que identifica cada linha do banco e não admite
+repetição. É ela que impede duas cópias de gravarem o mesmo código ao mesmo
+tempo — o mesmo papel que o `ConcurrentHashMap` fazia na fase 4, um andar acima.
 
 **Docker** — empacota seu programa com tudo que ele precisa, para rodar igual em
 qualquer máquina. Acaba com o "na minha máquina funciona". É a fase 8.

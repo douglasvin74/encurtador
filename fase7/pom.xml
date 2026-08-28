@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>estudo</groupId>
+  <artifactId>encurtador-fase7</artifactId>
+  <version>1.0</version>
+
+  <!--
+    Os mesmos dois programas da fase 6, agora sem estado dentro do processo:
+    o mapa codigo->URL mora no Postgres, entao da para subir N copias iguais.
+
+    Rodar (Nginx na 8080 distribuindo para as duas instancias):
+      INSTANCIA=a mvn -q exec:exec -Dporta=8091
+      INSTANCIA=b mvn -q exec:exec -Dporta=8092
+      mvn -q exec:exec -Dclasse=Contador -Dporta=8081
+
+    Ambiente: DB_URL, DB_USER, DB_PASSWORD, KAFKA_BOOTSTRAP, INSTANCIA.
+  -->
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kafka.version>4.3.1</kafka.version>
+    <postgres.version>42.7.4</postgres.version>
+    <!-- qual programa e em que porta: mvn exec:exec -Dclasse=Contador -Dporta=8081 -->
+    <porta>8080</porta>
+    <classe>Encurtador</classe>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-clients</artifactId>
+      <version>${kafka.version}</version>
+    </dependency>
+    <!--
+      O cliente Kafka loga via SLF4J; sem uma implementacao ele so reclama.
+      A versao TEM que casar com a do slf4j-api que o kafka-clients traz
+      (mvn dependency:tree para conferir) - 2.x com api 1.7 nao se enxergam.
+    -->
+    <!-- Primeira dependencia de banco: o estado saiu do processo (fase 7). -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>${postgres.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>1.7.36</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <configuration>
+          <!-- exec (nao java) para conseguir passar -ea e ligar o auto-teste. -->
+          <executable>java</executable>
+          <arguments>
+            <argument>-ea</argument>
+            <argument>-classpath</argument>
+            <classpath/>
+            <argument>${classe}</argument>
+            <argument>${porta}</argument>
+          </arguments>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

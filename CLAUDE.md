@@ -20,12 +20,23 @@ cd fase2 && java -ea Encurtador.java   # fase 2
 cd fase3 && java -ea Encurtador.java   # fase 3
 cd fase4 && java -ea Encurtador.java   # fase 4 - servidor em :8080, arg opcional muda a porta
 
-# fases 5 e 6: Maven + Kafka
+# fases 5+: Maven + Kafka
 ~/.local/opt/kafka/bin/kafka-server-start.sh -daemon ~/.local/opt/kafka/config/server.properties
 cd fase5 && mvn -q exec:exec [-Dporta=9090]
-cd fase6 && mvn -q exec:exec                             # (atual) escrita, :8080
+cd fase6 && mvn -q exec:exec                             # escrita, :8080
 cd fase6 && mvn -q exec:exec -Dclasse=Contador -Dporta=8081  # leitura, :8081
+
+# fase 7 (atual): + Postgres + Nginx. Exige DB_PASSWORD no ambiente.
+cd fase7 && INSTANCIA=a mvn -q exec:exec -Dporta=8091
+cd fase7 && INSTANCIA=b mvn -q exec:exec -Dporta=8092
+cd fase7 && mvn -q exec:exec -Dclasse=Contador -Dporta=8081
+mkdir -p /tmp/nginx-encurtador/logs
+nginx -p /tmp/nginx-encurtador -c $PWD/fase7/nginx.conf   # :8080 -> 8091, 8092
+nginx -p /tmp/nginx-encurtador -s stop
 ```
+
+`pgrep -f kafka.Kafka` casa com o proprio comando e mente que o broker esta no
+ar; use `ss -lptn 'sport = :9092'` ou tente conectar.
 
 Cada fase é um diretório próprio com um `Encurtador.java` autocontido. Fases
 anteriores não são apagadas nem refatoradas — servem de comparação.
@@ -38,6 +49,11 @@ pom, não `-Dexec.args` — esse último substitui a lista inteira de argumentos
 
 Kafka 4.3.1 KRaft em `~/.local/opt/kafka` (sem Docker até a fase 8);
 `KAFKA_BOOTSTRAP` sobrescreve `localhost:9092`.
+
+Postgres 18 na fase 7, base `encurtador`. Pelo socket o `psql` usa `peer` e não
+pede senha; o JDBC vai por TCP e cai no `scram-sha-256` — o role precisa de
+senha e `DB_PASSWORD` precisa estar no ambiente, senão nada sobe. Config toda
+por env: `DB_URL`, `DB_USER`, `DB_PASSWORD`, `KAFKA_BOOTSTRAP`, `INSTANCIA`.
 
 `-ea` é obrigatório — os testes são `assert` dentro de `autoTeste()`, e sem a
 flag eles passam silenciosamente sem testar nada. Não há framework de teste;
@@ -68,4 +84,15 @@ JUnit chega junto com o Maven.
   é o que prova a ligação.
 - **`commitSync()` depois de processar** o lote, nunca antes: at-least-once.
   Contar duas vezes é aceitável para estatística; perder não é.
+- **Nada de estado no processo a partir da fase 7.** O mapa código→URL mora no
+  Postgres, e é isso que permite N instâncias. Qualquer cache local que sobreviva
+  entre requisições reintroduz o 404 de "encurtei em A, cliquei em B" —
+  `AutoTeste.duasInstancias()` existe para pegar exatamente isso.
+- **`/health` pergunta pelo banco, nunca pelo Kafka.** Sem banco a instância não
+  atende e deve sair da rotação; sem Kafka ela atende normal. Reprovar por causa
+  do broker tiraria todas as instâncias juntas e derrubaria o site para proteger
+  um contador.
+- **`ON CONFLICT DO NOTHING RETURNING`** é o `putIfAbsent` da fase 4 no banco:
+  quem arbitra a corrida entre processos é a chave primária. Trocar por
+  `SELECT` seguido de `INSERT` traz o check-then-act de volta.
 - Toda lógica nova ganha uma asserção em `autoTeste()`.
