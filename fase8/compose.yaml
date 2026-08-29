@@ -1,0 +1,107 @@
+# A fase 7 inteira em um comando: docker compose up --build
+#
+# Eram cinco processos subidos a mao, na ordem certa, com Postgres e Kafka
+# instalados na maquina. Aqui a ordem e as dependencias estao declaradas, e o
+# unico requisito da maquina passa a ser ter Docker.
+
+name: encurtador
+
+services:
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: encurtador
+      POSTGRES_USER: encurtador
+      POSTGRES_PASSWORD: encurtador
+    volumes:
+      # Sem isso, "docker compose down" apaga os links junto com o container.
+      # Banco e o unico estado que precisa sobreviver ao ciclo de vida daqui.
+      #
+      # A partir da imagem 18 o volume vai em /var/lib/postgresql, e nao no
+      # subdiretorio data: montar direto em data faz a imagem abortar o boot,
+      # porque quebra o pg_upgrade --link de uma futura troca de versao.
+      - dados-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U encurtador -d encurtador"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      # KRaft: o mesmo processo e broker e controller, sem Zookeeper.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Um broker so: pedir 3 replicas travaria a criacao dos topicos internos.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # As duas copias sao o MESMO servico escrito duas vezes: mesma imagem, mesmo
+  # ambiente, so o nome muda. E a definicao pratica de intercambiavel.
+  encurtador-a: &encurtador
+    build: .
+    environment: &ambiente-encurtador
+      CLASSE: Encurtador
+      INSTANCIA: a
+      DB_URL: jdbc:postgresql://postgres:5432/encurtador
+      DB_USER: encurtador
+      DB_PASSWORD: encurtador
+      KAFKA_BOOTSTRAP: kafka:9092
+    depends_on:
+      # service_healthy, nao service_started: container de pe nao e banco
+      # pronto. O auto-teste roda no boot e falha se o banco ainda estiver
+      # subindo - a espera precisa ser pela saude, nao pelo processo.
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s   # o auto-teste roda antes de o servidor abrir a porta
+
+  encurtador-b:
+    <<: *encurtador
+    environment:
+      <<: *ambiente-encurtador
+      INSTANCIA: b
+
+  contador:
+    <<: *encurtador
+    environment:
+      <<: *ambiente-encurtador
+      CLASSE: Contador
+    ports:
+      - "8081:8080"   # o lado da leitura fica fora do balanceamento
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:8080"   # a unica porta publicada do lado da escrita
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      encurtador-a:
+        condition: service_healthy
+      encurtador-b:
+        condition: service_healthy
+
+volumes:
+  dados-postgres:

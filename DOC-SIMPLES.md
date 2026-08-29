@@ -28,7 +28,7 @@ entender, e só então subir o próximo.
 | 5 ✅ | Registra cada clique sem travar | **Kafka** |
 | 6 ✅ | Conta e agrupa esses cliques | Como processar em segundo plano, e por que separar quem escreve de quem lê |
 | 7 ✅ | Roda em várias cópias ao mesmo tempo | **Load balance** |
-| 8 | Qualquer pessoa consegue rodar seu projeto | Docker (empacotamento) |
+| 8 ✅ | Qualquer pessoa consegue rodar seu projeto | Docker (empacotamento) |
 
 Ao final, isso é um projeto de GitHub que se defende sozinho numa entrevista.
 
@@ -330,7 +330,7 @@ lugar compartilhado. Está marcado no código; é assunto de outro projeto.)
 
 ---
 
-## Fase 7 — o que já está pronto
+## Fase 7 — várias cópias e um porteiro
 
 Até agora existia **um** programa atendendo todo mundo. Se ele caísse, o site
 caía. Se muita gente chegasse junto, ele sozinho aguentava o tranco.
@@ -436,6 +436,78 @@ site não pisca — o porteiro percebe e manda tudo para a que sobrou.
 Tudo isso está rodando na **sua máquina**, montado à mão, num terminal por
 programa. Cinco coisas para subir na ordem certa, e nenhuma garantia de que vai
 funcionar igual em outro computador. É esse incômodo que a fase 8 resolve.
+
+## Fase 8 — o que já está pronto
+
+A fase 7 terminou funcionando e chata de subir: cinco programas, cada um num
+terminal, na ordem certa — e só depois de instalar Postgres, Kafka, Nginx e Java
+na máquina. Se você trocasse de computador, começava tudo de novo. Se um amigo
+quisesse rodar, boa sorte.
+
+Agora é um comando:
+
+```bash
+cd encurtador/fase8
+docker compose up --build
+```
+
+E pronto: banco, correio, as duas cópias do site, o contador e o porteiro sobem
+juntos, na ordem certa, configurados. Para desligar tudo, `docker compose down`.
+
+### O que o Docker faz, sem jargão
+
+Ele empacota cada programa junto com tudo de que precisa para rodar — a versão
+certa do Java, as bibliotecas, os arquivos. Esse pacote é a **imagem**, e cada
+cópia rodando dela é um **container**.
+
+A vantagem é que o pacote roda igual em qualquer lugar que tenha Docker. Aquele
+"na minha máquina funciona" deixa de existir, porque a máquina deixou de
+importar.
+
+### A parte que mais muda
+
+Na fase 7, o porteiro precisava saber que as cópias estavam nas portas 8091 e
+8092 da sua máquina. Agora ele as chama **pelo nome**:
+
+```
+antes:  127.0.0.1:8091  e  127.0.0.1:8092
+agora:  encurtador-a    e  encurtador-b
+```
+
+O Docker cuida de traduzir nome em endereço. E como cada container tem sua
+própria rede, as duas cópias podem usar a **mesma** porta sem brigar — some o
+trabalho de ficar procurando porta livre.
+
+### Esperar a coisa certa
+
+Um detalhe que dá dor de cabeça em quem está começando: o banco *estar ligando*
+não é o mesmo que o banco *estar pronto*. Se o site subisse primeiro, ele
+tentaria conectar num banco que ainda está acordando e morreria no auto-teste.
+
+Por isso cada serviço diz como responder "estou pronto?", e os outros esperam
+essa resposta — não o simples "liguei". É o mesmo `/health` da fase 7, agora com
+um segundo emprego: segurar o porteiro fora do ar até as cópias atenderem de
+verdade.
+
+### O que sobrevive ao desligar
+
+Containers são descartáveis de propósito: some um, sobe outro igual. Mas o banco
+não pode ser — se os links sumissem a cada `docker compose down`, o projeto
+inteiro perderia a graça.
+
+Por isso o banco tem um **volume**: um pedaço de disco que fica de fora do
+container e sobrevive a ele. É a mesma ideia da fase 7 (o estado mora fora do
+programa), agora aparecendo na infraestrutura.
+
+### Nada mudou no código Java
+
+Vale reparar nisto: as oito fases terminaram sem que a fase 8 precisasse mexer
+numa linha do programa. Isso aconteceu porque na fase 7 toda configuração já
+vinha "de fora" (endereço do banco, do correio, nome da instância). Foi só
+trocar `localhost` pelos nomes dos serviços.
+
+Preparar o terreno numa fase para a seguinte ficar fácil é, no fim, do que este
+projeto todo se tratou.
 
 ## Dicionário
 
@@ -631,3 +703,20 @@ tempo — o mesmo papel que o `ConcurrentHashMap` fazia na fase 4, um andar acim
 
 **Docker** — empacota seu programa com tudo que ele precisa, para rodar igual em
 qualquer máquina. Acaba com o "na minha máquina funciona". É a fase 8.
+
+**Imagem** — o pacote pronto, parado, com o programa e tudo de que ele precisa.
+É a receita; ainda não está rodando.
+
+**Container** — uma cópia da imagem rodando. Da mesma imagem você sobe quantos
+containers quiser, e é assim que as duas cópias do site existem.
+
+**Dockerfile** — o arquivo com as instruções de como montar a imagem.
+
+**docker compose** — descreve vários containers e como eles se ligam, para tudo
+subir com um comando só, na ordem certa.
+
+**Volume** — pedaço de disco que fica de fora do container e sobrevive quando
+ele morre. É onde o banco guarda os links.
+
+**Multi-stage** — construir a imagem em duas etapas e jogar a primeira fora: as
+ferramentas de montagem não precisam ir junto no pacote final, que fica menor.

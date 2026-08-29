@@ -14,14 +14,14 @@ e só avança quando a anterior está rodando.
 | 5 ✅ | Publicação de eventos de clique no Kafka | Produtor, tópico, partição, chave, entrega assíncrona, degradação graciosa |
 | 6 ✅ | Consumidor de estatísticas | Grupo de consumidores, offset, rebalanceamento, at-least-once, CQRS |
 | 7 ✅ | Múltiplas instâncias atrás de load balancer | Statelessness, round-robin, health check, escala horizontal |
-| 8 | Empacotamento | Docker, `docker compose`, variáveis de ambiente |
+| 8 ✅ | Empacotamento | Docker, `docker compose`, variáveis de ambiente |
 
 ## Stack
 
 - **Java 25 (LTS)** — virtual threads finalizadas desde a 21; escolhido pelo suporte de longo prazo.
 - **Maven** — build e dependências. Adiado: até a fase 4 nada sai da stdlib, então o arquivo único continua bastando. Entra quando houver dependência de verdade (Kafka, fase 5).
-- **Kafka 4.3.1 (KRaft)** — broker de eventos. Instalado em `~/.local/opt/kafka`, rodando na JVM local; sem Docker até a fase 8.
-- **Nginx** — load balancer (fase 7). Instalado via apt, rodando sem serviço (`nginx -p`).
+- **Kafka 4.3.1 (KRaft)** — broker de eventos. Em `~/.local/opt/kafka` até a fase 7; imagem `apache/kafka:4.3.1` na fase 8.
+- **Nginx** — load balancer (fase 7). Instalado via apt até a fase 7; imagem `nginx:1.27-alpine` na fase 8.
 - **PostgreSQL 18** — fonte da verdade do mapa código→URL a partir da fase 7. Entra porque é ele que tira o estado de dentro do processo; sem isso não há statelessness, e sem statelessness não há load balance.
 - Sem framework web (nada de Spring) por escolha: o objetivo é ver o mecanismo,
   não a abstração que o esconde.
@@ -369,7 +369,7 @@ a fim prova que a ligação existe.
 
 A espera é ativa com prazo (20s): consumo é assíncrono, a contagem chega, mas
 não instantaneamente.
-## Fase 7 — estado atual
+## Fase 7 — concluída
 
 `fase7/`. Os mesmos dois programas da fase 6, mais duas coisas: o estado saiu do
 processo e passou a existir um load balancer na frente.
@@ -500,3 +500,124 @@ O que foi verificado à mão, com o Nginx no ar:
   vê só as partições que lhe couberam. O lado da escrita escala nesta fase, o da
   leitura não.
 - **Tudo na mesma máquina.** É exatamente o teto que a fase 8 remove.
+
+## Fase 8 — estado atual
+
+`fase8/`. Mesmo código da fase 7. O que muda é tudo em volta: `Dockerfile`,
+`compose.yaml` e um `nginx.conf` que fala por nome de serviço.
+
+A fase 7 terminou com cinco processos subidos à mão, na ordem certa, exigindo
+Postgres, Kafka, Nginx e Java 25 instalados na máquina. Agora:
+
+```bash
+docker compose up --build
+```
+
+### Uma imagem para dois programas
+
+`Encurtador` e `Contador` compartilham jar e classpath; só o comando muda. Duas
+imagens quase idênticas seriam duas coisas para construir, versionar e manter em
+sincronia — a diferença entre elas cabe na variável `CLASSE`, e o compose a
+define por serviço.
+
+### Multi-stage: o que constrói não é o que roda
+
+O primeiro estágio tem Maven e JDK; o segundo, só o JRE. A imagem final não
+carrega Maven, JDK nem código-fonte — menos superfície e menos coisa para dar
+errado do que embarcar o ambiente de build junto.
+
+A ordem do `COPY` é deliberada: `pom.xml` sozinho antes do `src`. Enquanto as
+dependências não mudam, o Docker reaproveita a camada com o `.m2` pronto, e
+alterar uma linha de código não rebaixa a internet de novo.
+
+O container roda como usuário sem privilégio: se alguém escapar do processo,
+escapa para um usuário sem poder nenhum. O JRE não precisa de root para abrir a
+8080.
+
+### `depends_on: service_healthy`, não `service_started`
+
+Container de pé não é banco pronto. O auto-teste roda no boot do `Encurtador` e
+falha se o Postgres ainda estiver inicializando — a espera precisa ser pela
+*saúde*, não pelo processo. Por isso Postgres e Kafka têm `healthcheck` e os
+serviços dependem da condição `service_healthy`.
+
+O `start_period: 60s` do `Encurtador` existe pelo mesmo motivo, do outro lado: o
+auto-teste roda **antes** de a porta abrir, então o container demora a ficar
+saudável sem estar com problema.
+
+E aqui o `/health` da fase 7 ganha o segundo uso: além do teste, é ele que
+segura o Nginx fora do ar até as duas instâncias estarem realmente atendendo.
+
+### Nome de serviço no lugar de porta
+
+O `nginx.conf` mudou em uma linha, e é a linha que resume a fase:
+
+```diff
+- server 127.0.0.1:8091;
+- server 127.0.0.1:8092;
++ server encurtador-a:8080;
++ server encurtador-b:8080;
+```
+
+Dentro da rede do compose, `encurtador-a` resolve para o IP do container — o DNS
+é do próprio Docker. Ninguém precisa saber IP de ninguém, e as duas instâncias
+podem usar a **mesma** porta, porque cada uma tem sua própria pilha de rede.
+Escalar deixa de significar procurar porta livre na máquina.
+
+Só duas portas são publicadas para fora: 8080 (Nginx) e 8081 (Contador). As
+instâncias do `Encurtador` não são alcançáveis de fora — quem quiser falar com
+elas passa pelo load balancer, que é o desenho correto.
+
+### Ambiente, não código
+
+Nada precisou mudar no Java, e isso não é sorte: desde a fase 7 toda
+configuração já vinha de variável de ambiente (`DB_URL`, `KAFKA_BOOTSTRAP`,
+`INSTANCIA`). Trocar `localhost` por `postgres` e `kafka` foi trocar valores no
+`compose.yaml`. É o pagamento da preparação feita na fase anterior.
+
+### O volume do Postgres
+
+`dados-postgres` existe porque sem ele `docker compose down` apagaria os links
+junto com o container. Container é descartável; o banco é o único estado que
+precisa sobreviver ao ciclo de vida daqui — a mesma distinção da fase 7, agora
+visível na infraestrutura.
+
+### Dois tropeços que valeram a pena
+
+**O volume do Postgres 18 não vai em `/var/lib/postgresql/data`.** A imagem
+aborta o boot se você montar direto no subdiretório: quebra o `pg_upgrade
+--link` de uma futura troca de versão. O volume vai um nível acima, em
+`/var/lib/postgresql`.
+
+**O auto-teste tinha uma corrida que só o compose revelou.** A limpeza apagava
+`WHERE url LIKE 'https://exemplo.com%'` — prefixo fixo. Enquanto as instâncias
+subiam à mão, uma de cada vez, nunca deu problema. O compose sobe as duas
+juntas, cada uma roda seu auto-teste contra a **mesma** tabela, e a limpeza de
+uma apagava as linhas da outra no meio do teste. O sintoma era um clique
+respondendo 404 sem nada de errado no código testado.
+
+A correção é o mesmo padrão da fase 6 (grupo de consumidores próprio para o
+teste): cada execução tem sua marca única, e só apaga o que ela criou. Vale
+guardar a lição — teste que compartilha estado global funciona até o dia em que
+alguém roda dois ao mesmo tempo.
+
+### Verificação
+
+O auto-teste roda no boot de cada container (`Auto-teste: OK (com Kafka)` nos
+logs de `encurtador-a` e `encurtador-b`). Com a stack no ar:
+
+- round-robin alternando `a`, `b` em requisições consecutivas pela :8080;
+- 6 cliques dividindo 3/3 entre as instâncias, virando `"cliques":6` na :8081;
+- `docker compose stop encurtador-a` → seis 302 seguidos, todos por `b`;
+- `start` de volta → tráfego volta a dividir 3/3;
+- `docker compose down` seguido de `up` → o link continua resolvendo, porque o
+  volume sobreviveu (o teste que só esta fase permite fazer).
+
+### Limitações assumidas
+
+- **Senha no `compose.yaml`.** Aceitável para estudo local; um ambiente de
+  verdade usa `secrets` ou um `.env` fora do versionamento.
+- **Um broker, um Postgres, sem réplica.** Réplicas de banco e de broker são
+  outro assunto, e grande.
+- **`replication.factor: 1`** nos tópicos internos do Kafka: com um broker só,
+  pedir 3 travaria a criação.
