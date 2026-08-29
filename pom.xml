@@ -5,20 +5,30 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>estudo</groupId>
-  <artifactId>encurtador-fase5</artifactId>
+  <artifactId>encurtador</artifactId>
   <version>1.0</version>
 
   <!--
-    Primeira fase com Maven. Ate a 4 tudo vinha da biblioteca padrao do Java e o
-    arquivo unico bastava. Agora precisamos do cliente Kafka, que e codigo de
-    terceiro - e e isso que o Maven resolve: baixar e por no classpath.
+    Dois programas, um de cada lado do Kafka:
+      Encurtador - escrita: encurta, redireciona, publica o clique
+      Contador   - leitura: consome os cliques e serve as estatisticas
+
+    O normal e subir tudo com "docker compose up". Para rodar direto na
+    maquina (exige Postgres e Kafka locais):
+      INSTANCIA=a mvn -q exec:exec -Dporta=8091
+      INSTANCIA=b mvn -q exec:exec -Dporta=8092
+      mvn -q exec:exec -Dclasse=Contador -Dporta=8081
+
+    Ambiente: DB_URL, DB_USER, DB_PASSWORD, KAFKA_BOOTSTRAP, INSTANCIA.
   -->
   <properties>
     <maven.compiler.release>25</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <kafka.version>4.3.1</kafka.version>
-    <!-- porta do servidor: mvn exec:exec -Dporta=9090 -->
+    <postgres.version>42.7.4</postgres.version>
+    <!-- qual programa e em que porta: mvn exec:exec -Dclasse=Contador -Dporta=8081 -->
     <porta>8080</porta>
+    <classe>Encurtador</classe>
   </properties>
 
   <dependencies>
@@ -32,6 +42,12 @@
       A versao TEM que casar com a do slf4j-api que o kafka-clients traz
       (mvn dependency:tree para conferir) - 2.x com api 1.7 nao se enxergam.
     -->
+    <!-- Primeira dependencia de banco: o estado saiu do processo (fase 7). -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>${postgres.version}</version>
+    </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-simple</artifactId>
@@ -52,7 +68,7 @@
             <argument>-ea</argument>
             <argument>-classpath</argument>
             <classpath/>
-            <argument>Encurtador</argument>
+            <argument>${classe}</argument>
             <argument>${porta}</argument>
           </arguments>
         </configuration>

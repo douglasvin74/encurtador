@@ -1,7 +1,18 @@
 # Encurtador de URLs — Documentação Técnica
 
-Projeto de estudo, construído em fases. Cada fase adiciona **um** conceito novo
-e só avança quando a anterior está rodando.
+Como este sistema foi construído: oito fases, cada uma adicionando **um**
+conceito novo e só avançando quando a anterior estava rodando.
+
+Cada fase vivia num diretório próprio (`fase1/` … `fase8/`) e nenhuma era
+refatorada depois — dava para abrir a primeira e a última lado a lado e ver o
+que mudou. O repositório hoje guarda apenas o resultado final, na raiz; **o
+código de cada fase continua no histórico do git**, nos commits que as
+introduziram. Os caminhos citados aqui (`fase3/Encurtador.java`, por exemplo)
+se referem a esse histórico.
+
+O que este documento registra, e é o motivo de ele existir: as decisões, as
+limitações assumidas de propósito e por que cada uma só foi resolvida na fase
+seguinte. O [README](README.md) descreve o sistema como ele está hoje.
 
 ## Roadmap
 
@@ -28,7 +39,7 @@ e só avança quando a anterior está rodando.
 
 ## Fase 1 — concluída
 
-Arquivo único: `fase1/Encurtador.java`. Roda pelo *single-file source launcher*
+Arquivo único, `Encurtador.java`. Roda pelo *single-file source launcher*
 do Java (`java Arquivo.java`), sem passo de compilação separado e sem build tool.
 
 ### Modelo
@@ -68,26 +79,26 @@ Sem ela, o auto-teste passa silenciosamente sem testar nada.
 ## Como rodar
 
 ```bash
-cd encurtador/fase1 && java -ea Encurtador.java   # fase 1
-cd encurtador/fase2 && java -ea Encurtador.java   # fase 2
-cd encurtador/fase3 && java -ea Encurtador.java   # fase 3
-cd encurtador/fase4 && java -ea Encurtador.java   # fase 4
-
-# fase 5 (estado atual): Maven, precisa do broker
-~/.local/opt/kafka/bin/kafka-server-start.sh -daemon ~/.local/opt/kafka/config/server.properties
-cd encurtador/fase5 && mvn -q exec:exec              # porta 8080
-
-# fase 6 (estado atual): dois programas, um de cada lado do Kafka
-cd encurtador/fase6 && mvn -q exec:exec                            # escrita, :8080
-cd encurtador/fase6 && mvn -q exec:exec -Dclasse=Contador -Dporta=8081  # leitura, :8081
+docker compose up --build     # tudo: banco, broker, duas instancias, contador, nginx
 ```
 
-Cada fase é um diretório independente e roda sozinha — a anterior continua
-funcionando para comparação.
+Para rodar direto na máquina, sem containers — exige Postgres e Kafka locais e
+`DB_PASSWORD` no ambiente:
+
+```bash
+INSTANCIA=a mvn -q exec:exec -Dporta=8091
+INSTANCIA=b mvn -q exec:exec -Dporta=8092
+mvn -q exec:exec -Dclasse=Contador -Dporta=8081
+nginx -p /tmp/nginx-encurtador -c $PWD/nginx.conf
+```
+
+As fases 1–4 rodavam sem build tool, pelo *single-file source launcher*
+(`java -ea Encurtador.java`). Maven entrou na fase 5, com a primeira dependência
+fora da stdlib.
 
 ## Fase 2 — concluída
 
-`fase2/Encurtador.java`. Mesmo formato de arquivo único, duas mudanças.
+Mesmo formato de arquivo único, duas mudanças.
 
 ### Idempotência
 
@@ -129,7 +140,7 @@ segunda instância devolvendo o mesmo resultado.
 
 ## Fase 3 — concluída
 
-`fase3/Encurtador.java`. O domínio das fases 1–2 intacto; em volta dele, um
+O domínio das fases 1–2 intacto; em volta dele, um
 servidor HTTP.
 
 ### Servidor
@@ -177,7 +188,7 @@ raiz.
 
 ## Fase 4 — concluída
 
-`fase4/Encurtador.java`. Mesmas rotas, mesmo domínio; o que muda é atender
+Mesmas rotas, mesmo domínio; o que muda é atender
 muitas requisições ao mesmo tempo. **Três mudanças que só funcionam juntas** —
 trocar apenas o executor produz corrupção silenciosa.
 
@@ -235,7 +246,7 @@ Cada asserção corresponde a uma das três mudanças.
 
 ## Fase 5 — concluída
 
-`fase5/`. Primeira fase com **Maven**: `kafka-clients` é a primeira dependência
+Primeira fase com **Maven**: `kafka-clients` é a primeira dependência
 que não vem da stdlib. Duas classes agora — `Encurtador` e `AutoTeste`, que
 cresceu ao precisar consumir do Kafka para verificar.
 
@@ -306,7 +317,7 @@ segundos e o evento já passou quando ele chega.
 
 ## Fase 6 — concluída
 
-`fase6/`. Dois programas no mesmo projeto, um de cada lado do Kafka:
+Dois programas no mesmo projeto, um de cada lado do Kafka:
 
 | Programa | Papel | Porta |
 |----------|-------|-------|
@@ -371,7 +382,7 @@ A espera é ativa com prazo (20s): consumo é assíncrono, a contagem chega, mas
 não instantaneamente.
 ## Fase 7 — concluída
 
-`fase7/`. Os mesmos dois programas da fase 6, mais duas coisas: o estado saiu do
+Os mesmos dois programas da fase 6, mais duas coisas: o estado saiu do
 processo e passou a existir um load balancer na frente.
 
 ```
@@ -501,9 +512,9 @@ O que foi verificado à mão, com o Nginx no ar:
   leitura não.
 - **Tudo na mesma máquina.** É exatamente o teto que a fase 8 remove.
 
-## Fase 8 — estado atual
+## Fase 8 — concluída
 
-`fase8/`. Mesmo código da fase 7. O que muda é tudo em volta: `Dockerfile`,
+Mesmo código da fase 7. O que muda é tudo em volta: `Dockerfile`,
 `compose.yaml` e um `nginx.conf` que fala por nome de serviço.
 
 A fase 7 terminou com cinco processos subidos à mão, na ordem certa, exigindo
